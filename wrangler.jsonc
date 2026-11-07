@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "farmstand",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-20",
+  // Static files (style.css, app.js) are served before the Worker runs.
+  "assets": { "directory": "./public" },
+  // No database_id: Wrangler provisions the database on first deploy,
+  // and the Deploy to Cloudflare button does the same for self-hosters.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "farmstand", "migrations_dir": "migrations" }
+  ],
+  // Daily at 07:17 UTC: remove contact details from closed orders older than 30 days.
+  "triggers": { "crons": ["17 7 * * *"] },
+  "vars": {
+    "CASH_ROUND_CENTS": "5",
+    "TIMEZONE": "America/Halifax",
+    "TURNSTILE_SITE_KEY": ""
+  },
+  "observability": { "enabled": true }
+}
