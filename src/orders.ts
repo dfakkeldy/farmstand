@@ -312,6 +312,20 @@ export async function markNotFound(db: D1Database, standId: number, orderId: num
   }, now);
 }
 
+/**
+ * Pure: can the seller undo this pick up or release? Only the seller's own taps, made today
+ * and after the last visit (a visit has already counted the result).
+ */
+export function canReopen(order: Order, opts: { now: number; tz: string; lastVisitAt: number | null }): boolean {
+  if (order.closed_by !== "seller" || !order.reopen_ok || order.closed_at === null) return false;
+  if (order.status !== "picked_up" && order.status !== "released") return false;
+  if (order.prev_status !== "placed" && order.prev_status !== "ready") return false;
+  // A released basket that was already put back on the shelf can't simply become Ready again.
+  if (order.status === "released" && order.prev_status === "ready" && !order.to_unpack) return false;
+  if (localDate(order.closed_at, opts.tz) !== localDate(opts.now, opts.tz)) return false;
+  return opts.lastVisitAt === null || opts.lastVisitAt < order.closed_at;
+}
+
 /** Undo a seller's pick up or release made today, after the last visit. */
 export async function reopenOrder(
   db: D1Database,
@@ -320,15 +334,10 @@ export async function reopenOrder(
   opts: { now: number; tz: string },
 ): Promise<"ok" | "not_allowed" | "no_stock"> {
   const order = await getOrder(db, standId, orderId);
-  if (!order || order.closed_by !== "seller" || !order.reopen_ok || order.closed_at === null) return "not_allowed";
-  if (order.status !== "picked_up" && order.status !== "released") return "not_allowed";
-  const back = order.prev_status;
-  if (back !== "placed" && back !== "ready") return "not_allowed";
-  // A released basket that was already put back on the shelf can't simply become Ready again.
-  if (order.status === "released" && back === "ready" && !order.to_unpack) return "not_allowed";
-  if (localDate(order.closed_at, opts.tz) !== localDate(opts.now, opts.tz)) return "not_allowed";
+  if (!order) return "not_allowed";
   const visit = await lastVisit(db, standId);
-  if (visit && visit.at >= order.closed_at) return "not_allowed";
+  if (!canReopen(order, { ...opts, lastVisitAt: visit?.at ?? null })) return "not_allowed";
+  const back = order.prev_status!;
 
   const lines = await getLines(db, orderId);
   const returning = order.status === "picked_up";
