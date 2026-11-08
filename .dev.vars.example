@@ -1,0 +1,4 @@
+# Optional. Copy to .dev.vars for local development, or set in production with:
+#   npx wrangler secret put TURNSTILE_SECRET
+# Turnstile also needs TURNSTILE_SITE_KEY in wrangler.jsonc and turnstile_on = 1 on the stand.
+TURNSTILE_SECRET=
