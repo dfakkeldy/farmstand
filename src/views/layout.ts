@@ -39,8 +39,10 @@ ${o.body}
 
 /** "Updated 10:42" plus the line shown when a refresh fails. */
 export function freshness(time: string): Html {
+  // Canadian times end in "a.m." / "p.m.", so don't add a second full stop.
+  const end = time.endsWith(".") ? "" : ".";
   return html`<p class="stamp" id="stamp">Updated ${time}</p>
-<p class="offline" id="offline" hidden role="status">No signal. Showing what we knew at ${time}.</p>`;
+<p class="offline" id="offline" hidden role="status">No signal. Showing what we knew at ${time}${end}</p>`;
 }
 
 export function footer(): Html {

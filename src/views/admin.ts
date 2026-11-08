@@ -29,6 +29,11 @@ export interface AdminView {
 
 const DAY = 86_400_000;
 
+/** "_v" can never be a stand slug, so the version endpoint can't collide with a stand. */
+export function adminVersionPath(token: string): string {
+  return `/admin/${token}/_v`;
+}
+
 function base(v: AdminView, stand: Stand): string {
   return `/admin/${v.token}/${stand.slug}`;
 }
@@ -54,9 +59,9 @@ function packCard(o: Order, lines: OrderLine[], v: AdminView, stand: Stand): Htm
       return html`<li class="pack-line">
       <label for="${id}">${l.item_name}${l.unit_label ? ` (${l.unit_label})` : ""} <span class="muted">asked ${l.qty}</span></label>
       <div class="stepper">
-        <button type="button" class="step" data-step="-1" data-for="${id}" aria-label="One less">−</button>
+        <button type="button" class="step" data-step="-1" data-for="${id}" aria-label="One less ${l.item_name}">−</button>
         <input id="${id}" name="item_${l.item_id}" type="number" inputmode="numeric" min="0" max="${l.qty}" value="${l.qty}" data-price="${l.price_cents}">
-        <button type="button" class="step" data-step="1" data-for="${id}" aria-label="One more">+</button>
+        <button type="button" class="step" data-step="1" data-for="${id}" aria-label="One more ${l.item_name}">+</button>
       </div>
     </li>`;
     })}</ul>
@@ -183,7 +188,10 @@ function nextLine(p: StandPanel, v: AdminView): Html {
   if (old) parts.push(html`<span class="warn-text">${old} not closed</span>`);
   parts.push(html`<span>${p.lastVisitAt ? `last visit ${formatWhen(p.lastVisitAt, v.now, v.tz)}` : "no visit yet"}</span>`);
   const joined = parts.map((x, i) => (i ? html` · ${x}` : x));
-  return html`<p class="next-line">${joined} <a class="button primary small-btn" href="${base(v, p.stand)}/visit">Start visit</a></p>`;
+  return html`<li class="next-line">
+  <span class="next-text"><a href="#stand-${slug}"><strong>${p.stand.name}</strong></a>: ${joined}</span>
+  <a class="button primary small-btn" href="${base(v, p.stand)}/visit">Start visit</a>
+</li>`;
 }
 
 function checklist(p: StandPanel, v: AdminView): Html {
@@ -206,15 +214,15 @@ function panel(p: StandPanel, v: AdminView): Html {
   return html`<section class="stand-panel" id="stand-${stand.slug}">
   <h2>${stand.name} <a class="small" href="/${stand.slug}">public page</a></h2>
   ${stand.paused ? html`<p class="notice">Online orders are paused.</p>` : ""}
-  ${nextLine(p, v)}
   ${firstRun ? checklist(p, v) : ""}
   ${toPack.length ? html`<h3 id="pack-${stand.slug}">To pack</h3><ul class="cards">${toPack.map((o) => packCard(o, lines(o), v, stand))}</ul>` : ""}
   ${ready.length ? html`<h3 id="ready-${stand.slug}">Ready</h3><ul class="cards">${ready.map((o) => readyCard(o, lines(o), v, stand))}</ul>` : ""}
   ${p.unpack.length ? html`<h3 id="unpack-${stand.slug}">To unpack</h3><ul class="cards">${p.unpack.map((o) => unpackCard(o, v, stand))}</ul>` : ""}
   ${p.closedToday.length ? html`<h3>Closed today</h3><ul class="closed">${p.closedToday.map((o) => closedRow(o, v, stand, p.reopenable.has(o.id)))}</ul>` : ""}
-  <h3>Items</h3>
+  <details class="items-block"${firstRun ? " open" : ""}><summary><h3>Items (${visible.length})</h3></summary>
   ${p.items.length ? html`<ul class="cards">${p.items.map((i) => itemCard(i, v, stand))}</ul>` : ""}
   ${addItemForm(v, stand, firstRun)}
+  </details>
   ${settingsForm(v, stand)}
   <p class="links"><a href="${base(v, stand)}/sign">Sign</a> · <a href="${base(v, stand)}/orders.csv">Orders (CSV)</a> · <a href="${base(v, stand)}/visits.csv">Visits (CSV)</a></p>
 </section>`;
@@ -223,7 +231,7 @@ function panel(p: StandPanel, v: AdminView): Html {
 export function adminPage(v: AdminView): Html {
   return layout({
     title: `${v.seller.name} · Farmstand`,
-    poll: `/admin/${v.token}/v`,
+    poll: adminVersionPath(v.token),
     version: v.version,
     body: html`<main class="page">
   <header class="head">
@@ -232,6 +240,7 @@ export function adminPage(v: AdminView): Html {
     ${freshness(formatTime(v.now, v.tz))}
   </header>
   ${v.flash ? html`<p class="flash" role="status">${v.flash}</p>` : ""}
+  ${v.panels.length ? html`<ul class="next-lines">${v.panels.map((p) => nextLine(p, v))}</ul>` : ""}
   ${v.panels.length ? v.panels.map((p) => panel(p, v)) : html`<p class="notice">No stands yet. Ask the person who set this up to add one.</p>`}
 </main>`,
   });

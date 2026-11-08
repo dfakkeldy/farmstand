@@ -71,9 +71,9 @@ export function visitPage(v: VisitPageView): Html {
       return html`<div class="pack-line">
       <label for="${id}">${l.item_name} <span class="muted">asked ${l.qty}</span></label>
       <div class="stepper">
-        <button type="button" class="step" data-step="-1" data-for="${id}" aria-label="One less">−</button>
+        <button type="button" class="step" data-step="-1" data-for="${id}" aria-label="One less ${l.item_name}">−</button>
         <input id="${id}" name="${id}" type="number" inputmode="numeric" min="0" max="${l.qty}" value="${val(id, String(l.qty))}" data-price="${l.price_cents}" data-item="${l.item_id}" data-qty="${l.qty}" data-pack-input>
-        <button type="button" class="step" data-step="1" data-for="${id}" aria-label="One more">+</button>
+        <button type="button" class="step" data-step="1" data-for="${id}" aria-label="One more ${l.item_name}">+</button>
       </div>
     </div>`;
     })}
@@ -89,7 +89,7 @@ export function visitPage(v: VisitPageView): Html {
     return html`<div class="count-row" data-count data-item="${i.id}" data-stock="${i.stock}" data-tally="${i.short_since_visit}" data-price="${i.price_cents}">
     <p class="count-name"><strong>${i.name}</strong>${i.unit_label ? ` (${i.unit_label})` : ""} <output class="count-result" aria-live="polite"></output></p>
     <div class="count-inputs">
-      <label>On the shelf <input name="count_${i.id}" type="number" inputmode="numeric" min="0" placeholder="not counted" value="${val(`count_${i.id}`)}"></label>
+      <label>On the shelf <input name="count_${i.id}" type="number" inputmode="numeric" min="0" placeholder="skip" value="${val(`count_${i.id}`)}"></label>
       <label>Taking away <input name="removed_${i.id}" type="number" inputmode="numeric" min="0" placeholder="0" value="${val(`removed_${i.id}`)}"></label>
       <label>Adding <input name="restocked_${i.id}" type="number" inputmode="numeric" min="0" placeholder="0" value="${val(`restocked_${i.id}`)}"></label>
     </div>

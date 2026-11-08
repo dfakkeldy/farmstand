@@ -241,4 +241,27 @@ describe("seller pages", () => {
     const res = await get(`/admin/${await link(f.sellerId)}/_v`);
     expect(await res.json()).toHaveProperty("v");
   });
+
+  it("every page's refresh address answers (no false 'No signal')", async () => {
+    const f = await makeStand();
+    const order = await orderFor(f, { [f.item("Eggs").id]: 1 });
+    for (const page of [`/admin/${await link(f.sellerId)}`, `/o/${order.public_token}`]) {
+      const body = await (await get(page)).text();
+      const poll = /data-poll="([^"]+)"/.exec(body)?.[1];
+      expect(poll, page).toBeTruthy();
+      const res = await get(poll!);
+      expect(res.status, poll).toBe(200);
+      expect(await res.json()).toHaveProperty("v");
+    }
+  });
+
+  it("lists every stand's next actions at the top, before any stand's details", async () => {
+    const first = await makeStand();
+    const second = await makeStand({ sellerId: first.sellerId });
+    await orderFor(second, { [second.item("Eggs").id]: 1 });
+    const body = await text(await get(`/admin/${await link(first.sellerId)}`));
+    const summary = body.indexOf(`${second.stand.name}</strong></a>: <a href="#pack-${second.stand.slug}">1 to pack</a>`);
+    expect(summary).toBeGreaterThan(-1);
+    expect(summary).toBeLessThan(body.indexOf(`id="stand-${first.stand.slug}"`));
+  });
 });
