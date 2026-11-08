@@ -176,6 +176,21 @@ describe("seller pages", () => {
     expect(body).toContain("Add your first item");
   });
 
+  it("keeps the setup checklist until the stand has items and pickup info", async () => {
+    const f = await makeStand(); // has items, no pickup info yet
+    const token = await link(f.sellerId);
+    const midway = await text(await get(`/admin/${token}`));
+    expect(midway).toContain('<ol class="checklist">');
+    expect(midway).toMatch(/<li class="done">Add your first item/);
+    expect(midway).toMatch(/<li>Say where baskets go and when you visit/);
+    expect(midway).toContain('<details class="settings" open>');
+
+    await setStand(f.stand.id, { pickup_info: "Baskets go on the left shelf." });
+    const done = await text(await get(`/admin/${token}`));
+    expect(done).not.toContain('<ol class="checklist">');
+    expect(done).toContain('<details class="settings">');
+  });
+
   it("can't reach another seller's stand", async () => {
     const mine = await makeStand();
     const theirs = await makeStand();

@@ -163,8 +163,8 @@ function addItemForm(v: AdminView, stand: Stand, open: boolean): Html {
 </details>`;
 }
 
-function settingsForm(v: AdminView, stand: Stand): Html {
-  return html`<details><summary>Stand settings</summary>
+function settingsForm(v: AdminView, stand: Stand, open: boolean): Html {
+  return html`<details class="settings"${open ? " open" : ""}><summary>Stand settings</summary>
   <form method="post" action="${base(v, stand)}/settings" class="stack-form">
     <label for="pi_${stand.id}">Pickup info: where baskets go and when you usually visit</label>
     <textarea id="pi_${stand.id}" name="pickup_info" maxlength="200" rows="2" placeholder="Baskets go on the left shelf. Usually packed by 5 pm.">${stand.pickup_info}</textarea>
@@ -194,10 +194,13 @@ function nextLine(p: StandPanel, v: AdminView): Html {
 </li>`;
 }
 
-function checklist(p: StandPanel, v: AdminView): Html {
+/** Shown until the stand has an item and pickup info; the steps the app can see get a tick. */
+function checklist(p: StandPanel, hasItems: boolean): Html {
+  const step = (done: boolean, text: string) =>
+    done ? html`<li class="done">${text} <span class="tick">✓ done</span></li>` : html`<li>${text}</li>`;
   return html`<ol class="checklist">
-  <li>Add your first item (below).</li>
-  <li>Say where baskets go and when you visit (Stand settings, pickup info).</li>
+  ${step(hasItems, hasItems ? "Add your first item" : "Add your first item (below).")}
+  ${step(Boolean(p.stand.pickup_info), "Say where baskets go and when you visit (Stand settings, pickup info).")}
   <li><a href="/${p.stand.slug}/sign">Print your sign</a>.</li>
   <li>Add this page to your home screen, so it's one tap away.</li>
 </ol>`;
@@ -210,11 +213,12 @@ function panel(p: StandPanel, v: AdminView): Html {
   const ready = p.open.filter((o) => o.status === "ready").sort(notClosedFirst);
   const visible = p.items.filter((i) => i.active);
   const firstRun = visible.length === 0;
+  const needsSetup = firstRun || !stand.pickup_info;
   const lines = (o: Order) => p.lines.get(o.id) ?? [];
   return html`<section class="stand-panel" id="stand-${stand.slug}">
   <h2>${stand.name} <a class="small" href="/${stand.slug}">public page</a></h2>
   ${stand.paused ? html`<p class="notice">Online orders are paused.</p>` : ""}
-  ${firstRun ? checklist(p, v) : ""}
+  ${needsSetup ? checklist(p, !firstRun) : ""}
   ${toPack.length ? html`<h3 id="pack-${stand.slug}">To pack</h3><ul class="cards">${toPack.map((o) => packCard(o, lines(o), v, stand))}</ul>` : ""}
   ${ready.length ? html`<h3 id="ready-${stand.slug}">Ready</h3><ul class="cards">${ready.map((o) => readyCard(o, lines(o), v, stand))}</ul>` : ""}
   ${p.unpack.length ? html`<h3 id="unpack-${stand.slug}">To unpack</h3><ul class="cards">${p.unpack.map((o) => unpackCard(o, v, stand))}</ul>` : ""}
@@ -223,8 +227,8 @@ function panel(p: StandPanel, v: AdminView): Html {
   ${p.items.length ? html`<ul class="cards">${p.items.map((i) => itemCard(i, v, stand))}</ul>` : ""}
   ${addItemForm(v, stand, firstRun)}
   </details>
-  ${settingsForm(v, stand)}
-  <p class="links"><a href="/${stand.slug}/sign">Sign</a> ·<a href="${base(v, stand)}/orders.csv">Orders (CSV)</a> · <a href="${base(v, stand)}/visits.csv">Visits (CSV)</a></p>
+  ${settingsForm(v, stand, !firstRun && !stand.pickup_info)}
+  <p class="links"><a href="/${stand.slug}/sign">Sign</a> · <a href="${base(v, stand)}/orders.csv">Orders (CSV)</a> · <a href="${base(v, stand)}/visits.csv">Visits (CSV)</a></p>
 </section>`;
 }
 
