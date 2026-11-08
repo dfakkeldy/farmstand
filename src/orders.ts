@@ -148,6 +148,11 @@ export async function placeOrder(db: D1Database, stand: Stand, input: PlaceInput
   return { ok: true, token };
 }
 
+/** Units to pack for a line: what the seller entered, clamped to 0..asked; missing or invalid means all. */
+export function packedUnits(line: OrderLine, raw: number | undefined): number {
+  return raw === undefined || !Number.isInteger(raw) ? line.qty : Math.min(Math.max(raw, 0), line.qty);
+}
+
 /** Pack an order. Short lines lower stock and held together and go on the item's tally. */
 export async function packOrder(
   db: D1Database,
@@ -159,9 +164,22 @@ export async function packOrder(
   const order = await getOrder(db, standId, orderId);
   if (!order || order.status !== "placed") return "stale";
   const lines = await getLines(db, orderId);
+  const { stmts, nothing } = packStatements(db, order, lines, packed, clock);
+  const res = await db.batch(stmts);
+  if ((res.at(-1)?.meta.changes ?? 0) !== 1) return "stale";
+  return nothing ? "released" : "ready";
+}
+
+/** The statements that pack an order; the order's own update is last. Used alone and inside a visit. */
+export function packStatements(
+  db: D1Database,
+  order: Order,
+  lines: OrderLine[],
+  packed: Record<number, number>,
+  clock: Clock,
+): { stmts: D1PreparedStatement[]; nothing: boolean } {
   const plan = lines.map((line) => {
-    const raw = packed[line.item_id];
-    const p = raw === undefined || !Number.isInteger(raw) ? line.qty : Math.min(Math.max(raw, 0), line.qty);
+    const p = packedUnits(line, packed[line.item_id]);
     return { line, p, short: line.qty - p };
   });
   const total = plan.reduce((sum, x) => sum + x.p * x.line.price_cents, 0);
@@ -196,12 +214,10 @@ export async function packOrder(
       )
       .bind(nothing ? "released" : "ready", total, cash, nothing ? now : null, nothing ? "seller" : null, now, order.id),
   );
-  const res = await db.batch(stmts);
-  if ((res.at(-1)?.meta.changes ?? 0) !== 1) return "stale";
-  return nothing ? "released" : "ready";
+  return { stmts, nothing };
 }
 
-interface CloseSpec {
+export interface CloseSpec {
   to: OrderStatus;
   by: ClosedBy;
   /** Units leave the stand (pick up) rather than going back to the free count. */
@@ -212,6 +228,28 @@ interface CloseSpec {
 }
 
 async function closeOrder(db: D1Database, order: Order, lines: OrderLine[], spec: CloseSpec, now: number): Promise<boolean> {
+  const res = await db.batch(closeStatements(db, order, lines, spec, now));
+  return (res.at(-1)?.meta.changes ?? 0) === 1;
+}
+
+/** A pick up by the visit ("Gone (picked up)"). */
+export const VISIT_PICKUP: CloseSpec = {
+  to: "picked_up",
+  by: "visit",
+  leaves: true,
+  toUnpack: false,
+  reopenOk: false,
+  reportedPaid: false,
+};
+
+/** The statements that close an order; the order's own update is last. Used alone and inside a visit. */
+export function closeStatements(
+  db: D1Database,
+  order: Order,
+  lines: OrderLine[],
+  spec: CloseSpec,
+  now: number,
+): D1PreparedStatement[] {
   const from = order.status;
   const stmts = lines.map((line) => {
     const u = units(line);
@@ -243,8 +281,7 @@ async function closeOrder(db: D1Database, order: Order, lines: OrderLine[], spec
         from,
       ),
   );
-  const res = await db.batch(stmts);
-  return (res.at(-1)?.meta.changes ?? 0) === 1;
+  return stmts;
 }
 
 async function loadOpen(

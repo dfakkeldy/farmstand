@@ -69,6 +69,26 @@ export async function linesFor(db: D1Database, orderIds: number[]): Promise<Map<
   return map;
 }
 
+/**
+ * One row per stand; each MAX uses an index, so the cost stays flat as order history grows.
+ * Exported so a test can measure rows read.
+ */
+export const SELLER_VERSION_SQL = `SELECT
+    (SELECT MAX(updated_at) FROM orders WHERE stand_id = s.id) AS a,
+    (SELECT MAX(updated_at) FROM items WHERE stand_id = s.id) AS b,
+    (SELECT MAX(at) FROM visits WHERE stand_id = s.id) AS c
+  FROM stands s WHERE s.seller_id = ?`;
+
+/** Changes whenever any of the seller's orders, items or visits change; polled by the seller page. */
+export async function sellerVersion(db: D1Database, sellerId: number): Promise<string> {
+  const { results } = await db
+    .prepare(SELLER_VERSION_SQL)
+    .bind(sellerId)
+    .all<{ a: number | null; b: number | null; c: number | null }>();
+  const max = (k: "a" | "b" | "c") => Math.max(0, ...results.map((r) => r[k] ?? 0));
+  return `${max("a")}.${max("b")}.${max("c")}`;
+}
+
 export async function lastVisit(db: D1Database, standId: number): Promise<Visit | null> {
   return db
     .prepare("SELECT * FROM visits WHERE stand_id = ? ORDER BY at DESC, id DESC LIMIT 1")

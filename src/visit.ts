@@ -2,13 +2,17 @@
 // Order of work: A unpack, B baskets gone, C pack, D count (before removing), E cash.
 //
 //   present      = counted + units in Ready baskets
-//   walk_in_sold = max(0, stock - present) + short_since_visit
+//   walk_in_sold = max(0, stock - present + short_since_visit)
 //   new stock    = present - removed + restocked     (written as a delta)
 //   expected     = walk-in $ since the last cash count + app cash picked up since then
+//
+// The whole visit (unpack, baskets, packing, counts, the visit row) is one transaction. Guard
+// statements make it fail if any order the form relied on changed meanwhile, so a visit is
+// either fully applied or not at all, and a retry starts fresh.
 
-import { linesFor, listItems, listOrders } from "./db";
-import { clearUnpack, type Clock, packOrder, pickUpOrder } from "./orders";
-import { OPEN, type Stand, type Visit, type VisitLineRow, units } from "./types";
+import { linesFor, listOrders } from "./db";
+import { type Clock, closeStatements, packedUnits, packStatements, VISIT_PICKUP } from "./orders";
+import { type Item, OPEN, type Order, type OrderLine, type Stand, type Visit, type VisitLineRow, units } from "./types";
 
 export interface VisitItem {
   id: number;
@@ -98,7 +102,8 @@ export function computeVisit(items: VisitItem[], entries: Record<number, VisitEn
       line = {
         itemId: it.id, name: it.name, priceCents: it.priceCents, stockBefore: it.stock, inBaskets: it.inBaskets,
         counted: e.counted, present, shortSinceVisit: it.shortSinceVisit,
-        walkInSold: Math.max(0, gone) + it.shortSinceVisit, foundMore,
+        // Units written off at packing that turn up on the shelf cancel out, not count twice.
+        walkInSold: Math.max(0, gone + it.shortSinceVisit), foundMore,
         removed: e.removed, restocked: e.restocked, stockDelta: newStock - it.stock,
         tallyDelta: -it.shortSinceVisit, touched: true,
       };
@@ -134,29 +139,44 @@ export type SaveVisitResult =
   | { ok: true; visitId: number }
   | { ok: false; needsConfirm: ConfirmNeed[]; errors: VisitPlan["errors"] };
 
-/**
- * The items as they will be once the form's unpack/gone/pack steps are applied
- * (or as they are now, when `form` is null).
- */
-async function snapshot(db: D1Database, standId: number, form: VisitForm | null): Promise<VisitItem[]> {
-  const items = await listItems(db, standId);
-  const open = await listOrders(db, standId, OPEN);
-  const lines = await linesFor(db, open.map((o) => o.id));
-  const acc = new Map(items.map((i) => [i.id, { stock: i.stock, held: i.held, tally: i.short_since_visit, baskets: 0 }]));
-  for (const order of open) {
-    for (const line of lines.get(order.id) ?? []) {
+/** Items a visit covers: everything for sale, plus hidden items that still hold or owe a tally. */
+export async function visitItems(db: D1Database, standId: number): Promise<Item[]> {
+  const { results } = await db
+    .prepare(
+      "SELECT * FROM items WHERE stand_id = ? AND (active = 1 OR held > 0 OR short_since_visit > 0) ORDER BY sort, id",
+    )
+    .bind(standId)
+    .all<Item>();
+  return results;
+}
+
+interface Loaded {
+  items: Item[];
+  open: Order[];
+  lines: Map<number, OrderLine[]>;
+}
+
+async function load(db: D1Database, standId: number): Promise<Loaded> {
+  const [items, open] = await Promise.all([visitItems(db, standId), listOrders(db, standId, OPEN)]);
+  return { items, open, lines: await linesFor(db, open.map((o) => o.id)) };
+}
+
+/** Pure: the items as they will be once the form's baskets and packing are applied. */
+function predict(loaded: Loaded, form: VisitForm): VisitItem[] {
+  const acc = new Map(loaded.items.map((i) => [i.id, { stock: i.stock, held: i.held, tally: i.short_since_visit, baskets: 0 }]));
+  for (const order of loaded.open) {
+    for (const line of loaded.lines.get(order.id) ?? []) {
       const a = acc.get(line.item_id);
       if (!a) continue;
       if (order.status === "ready") {
-        if (form?.gone.includes(order.id)) {
+        if (form.gone.includes(order.id)) {
           a.stock -= units(line);
           a.held -= units(line);
         } else {
           a.baskets += units(line);
         }
-      } else if (form?.pack[order.id]) {
-        const raw = form.pack[order.id]![line.item_id];
-        const p = raw === undefined || !Number.isInteger(raw) ? line.qty : Math.min(Math.max(raw, 0), line.qty);
+      } else if (form.pack[order.id]) {
+        const p = packedUnits(line, form.pack[order.id]![line.item_id]);
         const short = line.qty - p;
         a.stock -= short;
         a.held -= short;
@@ -165,13 +185,50 @@ async function snapshot(db: D1Database, standId: number, form: VisitForm | null)
       }
     }
   }
-  return items.map((i) => {
+  return loaded.items.map((i) => {
     const a = acc.get(i.id)!;
     return {
       id: i.id, name: i.name, priceCents: i.price_cents,
       stock: a.stock, held: a.held, shortSinceVisit: a.tally, inBaskets: a.baskets,
     };
   });
+}
+
+const CHANGED_WORDS: Record<string, string> = {
+  cancelled: "was cancelled",
+  picked_up: "was picked up",
+  released: "was released",
+  not_found: "was reported missing",
+  ready: "was already packed",
+  placed: "isn't packed yet",
+};
+
+/** Messages for orders the form relied on that are no longer where the form saw them. */
+async function changedOrders(db: D1Database, standId: number, form: VisitForm, open: Order[]): Promise<string[]> {
+  const status = new Map(open.map((o) => [o.id, o.status]));
+  const expected: [number, string][] = [
+    ...Object.keys(form.pack).map((id) => [Number(id), "placed"] as [number, string]),
+    ...form.gone.map((id) => [id, "ready"] as [number, string]),
+  ];
+  const off = expected.filter(([id, want]) => status.get(id) !== want).map(([id]) => id);
+  if (off.length === 0) return [];
+  const { results } = await db
+    .prepare(`SELECT id, code, status FROM orders WHERE stand_id = ? AND id IN (${off.map(() => "?").join(", ")})`)
+    .bind(standId, ...off)
+    .all<{ id: number; code: string; status: string }>();
+  return results.map(
+    (o) => `${o.code} ${CHANGED_WORDS[o.status] ?? "changed"} while you counted. Check the basket, then save again.`,
+  );
+}
+
+/** Makes the whole batch fail (NOT NULL on stands.name) unless the order still has this status. */
+function assertStatus(db: D1Database, standId: number, orderId: number, status: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE stands SET name = CASE WHEN (SELECT status FROM orders WHERE id = ? AND stand_id = ?) = ? THEN name ELSE NULL END
+       WHERE id = ?`,
+    )
+    .bind(orderId, standId, status, standId);
 }
 
 async function visitIdForKey(db: D1Database, key: string): Promise<number | null> {
@@ -193,37 +250,57 @@ async function sum(db: D1Database, sql: string, ...params: (string | number)[]):
   return row?.s ?? 0;
 }
 
+/** Keys of the stand's latest visits, so a phone can drop a draft that was already saved. */
+export async function recentVisitKeys(db: D1Database, standId: number): Promise<string[]> {
+  const { results } = await db
+    .prepare("SELECT visit_key FROM visits WHERE stand_id = ? ORDER BY at DESC, id DESC LIMIT 5")
+    .bind(standId)
+    .all<{ visit_key: string }>();
+  return results.map((r) => r.visit_key);
+}
+
 export async function saveVisit(db: D1Database, stand: Stand, form: VisitForm, clock: Clock): Promise<SaveVisitResult> {
   const done = await visitIdForKey(db, form.visitKey);
   if (done !== null) return { ok: true, visitId: done };
 
-  // Check everything before writing anything.
-  const predicted = computeVisit(await snapshot(db, stand.id, form), form.entries, form.confirmed);
-  if (predicted.errors.length || predicted.needsConfirm.length) {
-    return { ok: false, needsConfirm: predicted.needsConfirm, errors: predicted.errors };
+  const loaded = await load(db, stand.id);
+  const changed = await changedOrders(db, stand.id, form, loaded.open);
+  if (changed.length) return { ok: false, needsConfirm: [], errors: changed.map((message) => ({ itemId: 0, message })) };
+
+  const plan = computeVisit(predict(loaded, form), form.entries, form.confirmed);
+  if (plan.errors.length || plan.needsConfirm.length) {
+    return { ok: false, needsConfirm: plan.needsConfirm, errors: plan.errors };
   }
 
-  // Phase 1: the order steps. Each is guarded, so a retry repeats nothing.
-  for (const id of form.unpack) await clearUnpack(db, stand.id, id, clock.now);
-  for (const id of form.gone) await pickUpOrder(db, stand.id, id, "visit", clock.now);
-  for (const [id, packed] of Object.entries(form.pack)) await packOrder(db, stand.id, Number(id), packed, clock);
-
-  // Phase 2: count from the real state, in one transaction.
-  const plan = computeVisit(await snapshot(db, stand.id, null), form.entries, true);
-  if (plan.errors.length) return { ok: false, needsConfirm: [], errors: plan.errors };
-
+  const lines = (o: Order) => loaded.lines.get(o.id) ?? [];
+  const goneOrders = loaded.open.filter((o) => o.status === "ready" && form.gone.includes(o.id));
+  const packOrders = loaded.open.filter((o) => o.status === "placed" && form.pack[o.id]);
   const since = await cashPeriodStart(db, stand);
-  const appCash = await sum(
-    db,
-    "SELECT SUM(cash_cents) AS s FROM orders WHERE stand_id = ? AND status = 'picked_up' AND closed_at > ?",
-    stand.id,
-    since,
-  );
+  const appCash =
+    (await sum(
+      db,
+      "SELECT SUM(cash_cents) AS s FROM orders WHERE stand_id = ? AND status = 'picked_up' AND closed_at > ?",
+      stand.id,
+      since,
+    )) + goneOrders.reduce((s, o) => s + o.cash_cents, 0);
   const earlierWalkin = await sum(db, "SELECT SUM(walkin_cents) AS s FROM visits WHERE stand_id = ? AND at > ?", stand.id, since);
   const expected = earlierWalkin + plan.walkinCents + appCash;
   const now = clock.now;
 
   const stmts: D1PreparedStatement[] = [
+    // The batch fails unless every order is still where the form saw it.
+    ...packOrders.map((o) => assertStatus(db, stand.id, o.id, "placed")),
+    ...goneOrders.map((o) => assertStatus(db, stand.id, o.id, "ready")),
+    // A. Unpack (either answer clears the flag; the count does the math).
+    ...form.unpack.map((id) =>
+      db
+        .prepare("UPDATE orders SET to_unpack = 0, updated_at = ? WHERE id = ? AND stand_id = ? AND to_unpack = 1")
+        .bind(now, id, stand.id),
+    ),
+    // B. Baskets that are gone, and C. packing.
+    ...goneOrders.flatMap((o) => closeStatements(db, o, lines(o), VISIT_PICKUP, now)),
+    ...packOrders.flatMap((o) => packStatements(db, o, lines(o), form.pack[o.id]!, clock).stmts),
+    // D and E. The visit itself.
     db
       .prepare(
         `INSERT INTO visits (stand_id, visit_key, at, walkin_cents, app_cash_cents, expected_cents, cash_counted_cents, note)
@@ -241,6 +318,7 @@ export async function saveVisit(db: D1Database, stand: Stand, form: VisitForm, c
         )
         .bind(form.visitKey, l.itemId, l.name, l.priceCents, l.stockBefore, l.inBaskets, l.counted,
           l.shortSinceVisit, l.walkInSold, l.foundMore, l.removed, l.restocked),
+      // Deltas on top of the basket and packing statements above, so a pickup at the same moment is kept.
       db
         .prepare(
           `UPDATE items SET stock = stock + ?, short_since_visit = short_since_visit + ?,
@@ -261,6 +339,12 @@ export async function saveVisit(db: D1Database, stand: Stand, form: VisitForm, c
     if (msg.includes("UNIQUE") && msg.includes("visit_key")) {
       const id = await visitIdForKey(db, form.visitKey);
       if (id !== null) return { ok: true, visitId: id };
+    }
+    if (msg.includes("NOT NULL") && msg.includes("stands.name")) {
+      const fresh = await listOrders(db, stand.id, OPEN);
+      const why = await changedOrders(db, stand.id, form, fresh);
+      const errors = why.length ? why : ["An order changed while you counted. Check the baskets, then save again."];
+      return { ok: false, needsConfirm: [], errors: errors.map((message) => ({ itemId: 0, message })) };
     }
     if (msg.includes("CHECK")) {
       return {

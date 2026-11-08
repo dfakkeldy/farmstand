@@ -36,9 +36,18 @@
     };
     orderForm.addEventListener("input", update);
     update();
+    const button = $("button[type=submit]", orderForm);
+    const label = button ? button.textContent : "";
     orderForm.addEventListener("submit", () => {
-      const b = $("button[type=submit]", orderForm);
-      if (b) { b.disabled = true; b.textContent = "Reserving…"; }
+      if (button) { button.disabled = true; button.textContent = "Reserving…"; }
+    });
+    // Back after ordering can restore this page from the browser's cache: make it usable again,
+    // with a fresh key so a second order isn't mistaken for the first.
+    window.addEventListener("pageshow", (e) => {
+      if (!e.persisted) return;
+      if (button) { button.disabled = false; button.textContent = label; }
+      const key = $('input[name="idem_key"]', orderForm);
+      if (key) key.value = crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now();
     });
   }
 
@@ -165,10 +174,10 @@
         const raw = $(`input[name="count_${id}"]`, r).value.trim();
         const counted = parseInt(raw, 10);
         if (raw === "" || Number.isNaN(counted)) { out.textContent = ""; return; }
+        // Same rule as the server: walk-in sold = max(0, gone + tally).
         const gone = stock[id] - (counted + baskets[id]);
-        out.textContent = gone >= 0
-          ? `→ ${gone + tally[id]} sold`
-          : `→ found ${-gone} more${tally[id] ? `, ${tally[id]} sold` : ""}`;
+        const sold = Math.max(0, gone + tally[id]);
+        out.textContent = gone >= 0 ? `→ ${sold} sold` : `→ found ${-gone} more${sold ? `, ${sold} sold` : ""}`;
       });
     };
 
@@ -184,7 +193,13 @@
 
     const restore = () => {
       const draft = store.get(key);
-      if (!draft || Date.now() - draft.at > DRAFT_MAX_AGE) { store.del(key); return; }
+      let saved = [];
+      try { saved = JSON.parse(vf.dataset.savedKeys || "[]"); } catch { /* none */ }
+      // Drop a draft that is old, or that was saved but whose "Saved" page never arrived.
+      if (!draft || Date.now() - draft.at > DRAFT_MAX_AGE || saved.includes(draft.data.visit_key)) {
+        store.del(key);
+        return;
+      }
       for (const el of vf.elements) {
         if (!el.name || !(el.name in draft.data)) continue;
         if (el.type === "radio" || el.type === "checkbox") el.checked = draft.data[el.name] === el.value;

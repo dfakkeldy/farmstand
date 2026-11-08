@@ -198,7 +198,7 @@ function checklist(p: StandPanel, v: AdminView): Html {
   return html`<ol class="checklist">
   <li>Add your first item (below).</li>
   <li>Say where baskets go and when you visit (Stand settings, pickup info).</li>
-  <li><a href="${base(v, p.stand)}/sign">Print your sign</a>.</li>
+  <li><a href="/${p.stand.slug}/sign">Print your sign</a>.</li>
   <li>Add this page to your home screen, so it's one tap away.</li>
 </ol>`;
 }
@@ -224,7 +224,7 @@ function panel(p: StandPanel, v: AdminView): Html {
   ${addItemForm(v, stand, firstRun)}
   </details>
   ${settingsForm(v, stand)}
-  <p class="links"><a href="${base(v, stand)}/sign">Sign</a> · <a href="${base(v, stand)}/orders.csv">Orders (CSV)</a> · <a href="${base(v, stand)}/visits.csv">Visits (CSV)</a></p>
+  <p class="links"><a href="/${stand.slug}/sign">Sign</a> ·<a href="${base(v, stand)}/orders.csv">Orders (CSV)</a> · <a href="${base(v, stand)}/visits.csv">Visits (CSV)</a></p>
 </section>`;
 }
 

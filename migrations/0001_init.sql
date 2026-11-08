@@ -53,6 +53,7 @@ CREATE TABLE items (
   CHECK (stock >= 0 AND held >= 0 AND held <= stock)
 );
 CREATE INDEX items_stand ON items (stand_id, active, sort);
+CREATE INDEX items_stand_updated ON items (stand_id, updated_at);
 
 CREATE TABLE orders (
   id                  INTEGER PRIMARY KEY,
@@ -81,6 +82,8 @@ CREATE TABLE orders (
 );
 CREATE INDEX orders_stand_status ON orders (stand_id, status, created_at);
 CREATE INDEX orders_stand_closed ON orders (stand_id, closed_at);
+-- The seller page polls MAX(updated_at) every 30 s; this index makes that one row read per stand.
+CREATE INDEX orders_stand_updated ON orders (stand_id, updated_at);
 
 -- Item name, unit and price are copied at order time, so later edits don't change old orders.
 CREATE TABLE order_lines (

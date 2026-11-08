@@ -5,7 +5,7 @@ import { html } from "hono/html";
 import { sellerFromToken, standForSeller, standsForSeller } from "./auth";
 import { randomToken } from "./codes";
 import { csv } from "./csv";
-import { getLines, getOrderByToken, getStand, getStandBySlug, lastVisit, linesFor, listItems, listOrders } from "./db";
+import { getLines, getOrderByToken, getStand, getStandBySlug, lastVisit, linesFor, listItems, listOrders, sellerVersion } from "./db";
 import { addItem, adjustStock, editItem, setHidden, setSoldOut } from "./items";
 import { formatMoney, parseMoney } from "./money";
 import {
@@ -22,7 +22,7 @@ import {
 import { scrub } from "./scrub";
 import { localDate } from "./time";
 import { OPEN, type Order, type Seller, type Stand, units } from "./types";
-import { getVisit, saveVisit, type VisitEntry, type VisitForm, weekSummary } from "./visit";
+import { getVisit, recentVisitKeys, saveVisit, type VisitEntry, type VisitForm, visitItems, weekSummary } from "./visit";
 import { adminPage, type StandPanel } from "./views/admin";
 import { messagePage, REPO_URL } from "./views/layout";
 import { FINAL, orderPage, statusLabel } from "./views/order";
@@ -61,10 +61,12 @@ app.use("*", async (c, next) => {
   h.set("Content-Security-Policy", CSP);
   h.set("Referrer-Policy", "no-referrer");
   h.set("X-Content-Type-Options", "nosniff");
+  // Live data: never serve a stale page (a cached stand page would also reuse its order key).
+  // Static files (style.css, app.js) are served before the Worker and keep their own caching.
+  h.set("Cache-Control", "no-store");
   if (c.req.path.startsWith("/admin/") || c.req.path.startsWith("/o/")) {
-    // Secret links: keep them out of search engines and caches.
+    // Secret links: keep them out of search engines.
     h.set("X-Robots-Tag", "noindex, nofollow");
-    h.set("Cache-Control", "no-store");
   }
 });
 
@@ -254,18 +256,6 @@ function backToAdmin(c: C, stand: Stand, flash = "") {
   return c.redirect(`/admin/${c.get("token")}#stand-${stand.slug}`, 303);
 }
 
-async function adminVersion(db: D1Database, sellerId: number): Promise<string> {
-  const row = await db
-    .prepare(
-      `SELECT
-         (SELECT COALESCE(MAX(o.updated_at), 0) FROM orders o JOIN stands s ON s.id = o.stand_id WHERE s.seller_id = ?1) AS a,
-         (SELECT COALESCE(MAX(i.updated_at), 0) FROM items i JOIN stands s ON s.id = i.stand_id WHERE s.seller_id = ?1) AS b,
-         (SELECT COALESCE(MAX(v.at), 0) FROM visits v JOIN stands s ON s.id = v.stand_id WHERE s.seller_id = ?1) AS c`,
-    )
-    .bind(sellerId)
-    .first<{ a: number; b: number; c: number }>();
-  return `${row?.a ?? 0}.${row?.b ?? 0}.${row?.c ?? 0}`;
-}
 
 async function toUnpack(db: D1Database, standId: number): Promise<Order[]> {
   const { results } = await db
@@ -303,12 +293,12 @@ app.get("/admin/:token", async (c) => {
   const panels = await Promise.all(stands.map((s) => buildPanel(c.env.DB, s, now, tz)));
   const flash = getCookie(c, "flash");
   if (flash) deleteCookie(c, "flash", { path: "/admin" });
-  const version = await adminVersion(c.env.DB, seller.id);
+  const version = await sellerVersion(c.env.DB, seller.id);
   return c.html(adminPage({ seller, token: c.get("token"), panels, now, tz, roundStep, version, flash }));
 });
 
 // The version endpoint uses "_v" so it can never collide with a stand slug.
-app.get("/admin/:token/_v", async (c) => c.json({ v: await adminVersion(c.env.DB, c.get("seller").id) }));
+app.get("/admin/:token/_v", async (c) => c.json({ v: await sellerVersion(c.env.DB, c.get("seller").id) }));
 
 const STALE = "That order changed in the meantime, so nothing was done.";
 
@@ -412,7 +402,12 @@ app.post(`/admin/:token/:slug{${SLUG}}/settings`, async (c) => {
 });
 
 async function visitData(db: D1Database, stand: Stand) {
-  const [items, open, unpack] = await Promise.all([listItems(db, stand.id), listOrders(db, stand.id, OPEN), toUnpack(db, stand.id)]);
+  const [items, open, unpack, savedKeys] = await Promise.all([
+    visitItems(db, stand.id),
+    listOrders(db, stand.id, OPEN),
+    toUnpack(db, stand.id),
+    recentVisitKeys(db, stand.id),
+  ]);
   const lines = await linesFor(db, [...open, ...unpack].map((o) => o.id));
   return {
     items,
@@ -420,6 +415,7 @@ async function visitData(db: D1Database, stand: Stand) {
     ready: open.filter((o) => o.status === "ready"),
     placed: open.filter((o) => o.status === "placed"),
     lines,
+    savedKeys,
   };
 }
 
@@ -493,11 +489,12 @@ app.get(`/admin/:token/:slug{${SLUG}}/visits/:id{[0-9]+}`, async (c) => {
   return c.html(visitSummaryPage({ stand, token: c.get("token"), ...found, week, now, tz }));
 });
 
-app.get(`/admin/:token/:slug{${SLUG}}/sign`, async (c) => {
-  const stand = await sellerStand(c);
-  if (!stand) return noSellerStand(c);
-  const url = `${new URL(c.req.url).origin}/${stand.slug}`;
-  return c.html(signPage(stand, url, `/admin/${c.get("token")}#stand-${stand.slug}`));
+// The sign has only public data, so it lives at a public address: browsers print the page
+// address in the footer, and a sign printed from a secret admin link would leak the key.
+app.get(`/:slug{${SLUG}}/sign`, async (c) => {
+  const stand = await getStandBySlug(c.env.DB, c.req.param("slug"));
+  if (!stand || !stand.active) return noStand(c);
+  return c.html(signPage(stand, `${new URL(c.req.url).origin}/${stand.slug}`));
 });
 
 function csvResponse(c: C, filename: string, body: string) {

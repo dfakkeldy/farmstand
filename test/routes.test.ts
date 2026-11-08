@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { randomToken, sha256Hex } from "../src/codes";
-import { getOrderByToken } from "../src/db";
+import { getOrderByToken, SELLER_VERSION_SQL } from "../src/db";
 import { app } from "../src/index";
 import { packOrder, placeOrder, releaseOrder } from "../src/orders";
 import { idem, itemRow, makeStand, setStand, type Fixture } from "./helpers";
@@ -53,6 +53,7 @@ describe("stand page", () => {
     expect(body).toContain("Reserve, pay cash at pickup");
     expect(res.headers.get("Content-Security-Policy")).toContain("default-src 'self'");
     expect(res.headers.get("Referrer-Policy")).toBe("no-referrer");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("greys out a sold-out item instead of hiding it", async () => {
@@ -230,10 +231,40 @@ describe("seller pages", () => {
     const csvText = await res.text();
     expect(csvText.split("\r\n")[0]).toBe("Created,Code,Status,Customer,Phone,Items,Total,Cash,Closed,Closed by");
     expect(csvText).toContain(`"'=HYPERLINK(""x"")"`);
-    const sign = await text(await get(`/admin/${token}/${f.stand.slug}/sign`));
+  });
+
+  it("serves the printable sign at a public address, and links to it without the key", async () => {
+    const f = await makeStand();
+    const token = await link(f.sellerId);
+    const admin = await text(await get(`/admin/${token}`));
+    expect(admin).toContain(`href="/${f.stand.slug}/sign"`);
+    expect(admin).not.toMatch(new RegExp(`/admin/${token}/[^"]*/sign`));
+    const sign = await text(await get(`/${f.stand.slug}/sign`));
     expect(sign).toContain("<svg");
     expect(sign).toContain(`/${f.stand.slug}`);
     expect(sign).toContain("Labelled baskets are reserved for online orders");
+    expect(sign).not.toContain(token);
+    expect((await get(`/admin/${token}/${f.stand.slug}/sign`)).status).toBe(404);
+  });
+
+  it("keeps the refresh check cheap however many orders a seller has", async () => {
+    const f = await makeStand();
+    const now = Date.now();
+    const stmts = [];
+    for (let i = 0; i < 300; i++) {
+      stmts.push(
+        db()
+          .prepare(
+            `INSERT INTO orders (stand_id, code, public_token, idem_key, customer_name, status, total_cents, cash_cents,
+               orig_total_cents, orig_cash_cents, created_at, updated_at, closed_at, closed_by)
+             VALUES (?, 'OWL-10', ?, ?, 'A', 'picked_up', 500, 500, 500, 500, ?, ?, ?, 'seller')`,
+          )
+          .bind(f.stand.id, `t-${i}-${now}`, `k-${i}-${now}`, now - i, now - i, now - i),
+      );
+    }
+    await db().batch(stmts);
+    const res = await db().prepare(SELLER_VERSION_SQL).bind(f.sellerId).all();
+    expect(res.meta.rows_read).toBeLessThan(20);
   });
 
   it("reports a version for refresh", async () => {

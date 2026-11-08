@@ -16,6 +16,8 @@ export interface VisitPageView {
   placed: Order[];
   lines: Map<number, OrderLine[]>;
   visitKey: string;
+  /** Keys of visits already saved, so the phone can drop a draft that was saved but not cleared. */
+  savedKeys: string[];
   roundStep: number;
   /** Raw form values when the page comes back with errors or a confirm. */
   values?: Record<string, string>;
@@ -117,7 +119,7 @@ export function visitPage(v: VisitPageView): Html {
   <h1>Visit ${v.stand.name}</h1>
   ${general.map((e) => html`<p class="error" role="alert">${e.message}</p>`)}
   ${v.errors?.length && !general.length ? html`<p class="error" role="alert">Please check the rows marked below.</p>` : ""}
-  <form method="post" action="${b}/visit" data-visit data-draft-key="farmstand-visit-${v.stand.slug}" data-restore="${v.values ? "0" : "1"}">
+  <form method="post" action="${b}/visit" data-visit data-draft-key="farmstand-visit-${v.stand.slug}" data-restore="${v.values ? "0" : "1"}" data-saved-keys="${JSON.stringify(v.savedKeys)}">
     <input type="hidden" name="visit_key" value="${val("visit_key", v.visitKey)}">
     ${confirm}
     ${sectionA}${sectionB}${sectionC}${sectionD}${sectionE}

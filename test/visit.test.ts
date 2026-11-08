@@ -186,6 +186,83 @@ describe("saveVisit", () => {
   });
 });
 
+describe("saveVisit when orders change while the seller counts", () => {
+  it("refuses, names the order, and writes nothing when a packed order was cancelled", async () => {
+    const f = await makeStand({ items: [{ name: "Eggs", price: 500, stock: 10 }] });
+    const eggs = f.item("Eggs").id;
+    const o = await order(f, { [eggs]: 3 });
+    const v = form({ pack: { [o.id]: { [eggs]: 3 } }, entries: { [eggs]: { counted: 7, removed: 0, restocked: 0 } } });
+    await cancelOrder(db(), f.stand.id, o.id, Date.now()); // while the seller was counting
+    const r = await saveVisit(db(), f.stand, v, clock());
+    expect(r).toMatchObject({ ok: false });
+    if (r.ok) return;
+    expect(r.errors[0]!.message).toBe(`${o.code} was cancelled while you counted. Check the basket, then save again.`);
+    const { results } = await db().prepare("SELECT id FROM visits WHERE stand_id = ?").bind(f.stand.id).all();
+    expect(results).toHaveLength(0);
+    expect(await itemRow(eggs)).toMatchObject({ stock: 10, held: 0 });
+  });
+
+  it("is all-or-nothing when the order changes at the very last moment", async () => {
+    const f = await makeStand({ items: [{ name: "Eggs", price: 500, stock: 10 }] });
+    const eggs = f.item("Eggs").id;
+    const o = await order(f, { [eggs]: 3 });
+    const real = db();
+    // A database whose batch() lets the customer cancel just before the visit's batch runs.
+    const racing = new Proxy(real, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (stmts: D1PreparedStatement[]) => {
+            await cancelOrder(real, f.stand.id, o.id, Date.now());
+            return target.batch(stmts);
+          };
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const r = await saveVisit(racing, f.stand, form({
+      pack: { [o.id]: { [eggs]: 3 } },
+      entries: { [eggs]: { counted: 7, removed: 0, restocked: 0 } },
+    }), clock());
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors[0]!.message).toContain(`${o.code} was cancelled while you counted`);
+    const { results } = await real.prepare("SELECT id FROM visits WHERE stand_id = ?").bind(f.stand.id).all();
+    expect(results).toHaveLength(0);
+    // Only the cancel happened: its hold is gone, and nothing was packed or counted.
+    expect(await itemRow(eggs)).toMatchObject({ stock: 10, held: 0, short_since_visit: 0 });
+    expect((await getOrderByToken(real, o.public_token))!).toMatchObject({ status: "cancelled", to_unpack: 0 });
+  });
+
+  it("does not count short-packed units twice when they turn up on the shelf", async () => {
+    const f = await makeStand({ items: [{ name: "Eggs", price: 500, stock: 10 }] });
+    const eggs = f.item("Eggs").id;
+    const o = await order(f, { [eggs]: 5 });
+    await packOrder(db(), f.stand.id, o.id, { [eggs]: 3 }, clock()); // 2 missing: stock 8, tally 2
+    // At the visit the 2 turn up: 7 loose + 3 in the basket = all 10.
+    const r = await saveVisit(db(), f.stand, form({ entries: { [eggs]: { counted: 7, removed: 0, restocked: 0 } } }), clock());
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const visit = await db().prepare("SELECT walkin_cents FROM visits WHERE id = ?").bind(r.visitId).first();
+    expect(visit).toMatchObject({ walkin_cents: 0 });
+    expect(await itemRow(eggs)).toMatchObject({ stock: 10, held: 3, short_since_visit: 0 });
+  });
+
+  it("includes hidden items that still have a tally", async () => {
+    const f = await makeStand({ items: [{ name: "Garlic", price: 150, stock: 10 }] });
+    const garlic = f.item("Garlic").id;
+    const o = await order(f, { [garlic]: 4 });
+    await packOrder(db(), f.stand.id, o.id, { [garlic]: 1 }, clock()); // tally 3
+    await db().prepare("UPDATE items SET active = 0 WHERE id = ?").bind(garlic).run();
+    const r = await saveVisit(db(), f.stand, form({ entries: { [garlic]: { counted: 6, removed: 0, restocked: 0 } } }), clock());
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const visit = await db().prepare("SELECT walkin_cents FROM visits WHERE id = ?").bind(r.visitId).first();
+    expect(visit).toMatchObject({ walkin_cents: 450 }); // the 3 written off at packing, settled now
+    expect((await itemRow(garlic)).short_since_visit).toBe(0);
+  });
+});
+
 describe("weekSummary", () => {
   it("adds up shelf sales, app cash and the box difference for the last 7 days", async () => {
     const f = await makeStand({ items: [{ name: "Eggs", price: 500, stock: 10 }] });
