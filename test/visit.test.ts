@@ -234,6 +234,19 @@ describe("saveVisit when orders change while the seller counts", () => {
     expect((await getOrderByToken(real, o.public_token))!).toMatchObject({ status: "cancelled", to_unpack: 0 });
   });
 
+  it("treats a double-tapped Save as one visit, not as 'order changed'", async () => {
+    const f = await makeStand({ items: [{ name: "Eggs", price: 500, stock: 10 }] });
+    const eggs = f.item("Eggs").id;
+    const o = await order(f, { [eggs]: 3 });
+    const v = form({ pack: { [o.id]: { [eggs]: 3 } }, entries: { [eggs]: { counted: 7, removed: 0, restocked: 0 } } });
+    const [a, b] = await Promise.all([saveVisit(db(), f.stand, v, clock()), saveVisit(db(), f.stand, v, clock())]);
+    expect(a).toMatchObject({ ok: true });
+    expect(b).toMatchObject({ ok: true });
+    if (!a.ok || !b.ok) return;
+    expect(b.visitId).toBe(a.visitId);
+    expect(await itemRow(eggs)).toMatchObject({ stock: 10, held: 3 });
+  });
+
   it("does not count short-packed units twice when they turn up on the shelf", async () => {
     const f = await makeStand({ items: [{ name: "Eggs", price: 500, stock: 10 }] });
     const eggs = f.item("Eggs").id;

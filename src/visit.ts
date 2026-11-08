@@ -335,11 +335,12 @@ export async function saveVisit(db: D1Database, stand: Stand, form: VisitForm, c
   try {
     await db.batch(stmts);
   } catch (err) {
+    // A double tap: the other request with this key saved the visit first. Its order steps
+    // make this batch's guards fail before the UNIQUE(visit_key) insert is reached, so check
+    // the key before reading the error as "an order changed".
+    const saved = await visitIdForKey(db, form.visitKey);
+    if (saved !== null) return { ok: true, visitId: saved };
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("UNIQUE") && msg.includes("visit_key")) {
-      const id = await visitIdForKey(db, form.visitKey);
-      if (id !== null) return { ok: true, visitId: id };
-    }
     if (msg.includes("NOT NULL") && msg.includes("stands.name")) {
       const fresh = await listOrders(db, stand.id, OPEN);
       const why = await changedOrders(db, stand.id, form, fresh);

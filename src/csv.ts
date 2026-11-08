@@ -1,5 +1,6 @@
-// Plain numbers, money and phone numbers ("-$2.00", "+1 902 555 0100") can't call a function.
-const PLAIN = /^[+-]?\$?[\d .,()-]+$/;
+// Negative money and plain negative numbers ("-$2.00", "-3") stay as they are. Anything else that
+// starts with a formula character keeps the apostrophe: Excel would read "+1-902-555-0100" as a sum.
+const PLAIN = /^-\$?\d[\d,]*(\.\d+)?$/;
 
 /** One CSV cell. Cells that a spreadsheet would run as a formula get a leading apostrophe. */
 export function cell(value: string | number | null | undefined): string {
